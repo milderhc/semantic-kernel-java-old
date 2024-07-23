@@ -10,16 +10,15 @@ import com.azure.core.util.MetricsOptions;
 import com.azure.core.util.TracingOptions;
 import com.azure.search.documents.indexes.SearchIndexAsyncClient;
 import com.azure.search.documents.indexes.SearchIndexClientBuilder;
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.microsoft.semantickernel.aiservices.openai.textembedding.OpenAITextEmbeddingGenerationService;
-import com.microsoft.semantickernel.connectors.data.azureaisearch.AzureAISearchVectorStore;
-import com.microsoft.semantickernel.connectors.data.azureaisearch.AzureAISearchVectorStoreOptions;
-import com.microsoft.semantickernel.connectors.data.azureaisearch.AzureAISearchVectorStoreRecordCollection;
+import com.microsoft.semantickernel.connectors.data.redis.RedisVectorStore;
+import com.microsoft.semantickernel.connectors.data.redis.RedisVectorStoreOptions;
+import com.microsoft.semantickernel.data.VectorStoreRecordCollection;
 import com.microsoft.semantickernel.data.recordattributes.VectorStoreRecordDataAttribute;
 import com.microsoft.semantickernel.data.recordattributes.VectorStoreRecordKeyAttribute;
 import com.microsoft.semantickernel.data.recordattributes.VectorStoreRecordVectorAttribute;
-import reactor.core.publisher.Flux;
-import reactor.core.publisher.Mono;
-
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Base64;
@@ -27,8 +26,12 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+import redis.clients.jedis.JedisPooled;
 
-public class AzureAISearch {
+public class ReddisAISearch {
+
     private static final String CLIENT_KEY = System.getenv("CLIENT_KEY");
     private static final String AZURE_CLIENT_KEY = System.getenv("AZURE_CLIENT_KEY");
 
@@ -44,7 +47,12 @@ public class AzureAISearch {
         .getOrDefault("EMBEDDING_MODEL_ID", "text-embedding-3-large");
     private static final int EMBEDDING_DIMENSIONS = 1536;
 
-    static class GitHubFile {
+    // Can start a test server with:
+    // docker run -d --name redis-stack -p 6379:6379 -p 8001:8001 redis/redis-stack:latest
+    private static final String REDDIS_URL = "redis://127.0.0.1:6379";
+
+    public static class GitHubFile {
+
         @VectorStoreRecordKeyAttribute()
         private final String id;
         @VectorStoreRecordDataAttribute(hasEmbedding = true, embeddingFieldName = "embedding")
@@ -58,15 +66,32 @@ public class AzureAISearch {
             this(null, null, null, Collections.emptyList());
         }
 
+        @JsonCreator
         public GitHubFile(
-            String id,
-            String description,
-            String link,
-            List<Float> embedding) {
+            @JsonProperty("id") String id,
+            @JsonProperty("description") String description,
+            @JsonProperty("link") String link,
+            @JsonProperty("embedding") List<Float> embedding) {
             this.id = id;
             this.description = description;
             this.link = link;
             this.embedding = embedding;
+        }
+
+        public String getId() {
+            return id;
+        }
+
+        public String getDescription() {
+            return description;
+        }
+
+        public String getLink() {
+            return link;
+        }
+
+        public List<Float> getEmbedding() {
+            return embedding;
         }
 
         static String encodeId(String realId) {
@@ -113,14 +138,15 @@ public class AzureAISearch {
         SearchIndexAsyncClient searchClient,
         OpenAITextEmbeddingGenerationService embeddingGeneration) {
 
-        // Create a new Azure AI Search vector store
-        var azureAISearchVectorStore = new AzureAISearchVectorStore<>(searchClient,
-            AzureAISearchVectorStoreOptions.<GitHubFile>builder()
-                .withRecordClass(GitHubFile.class)
-                .build());
+        JedisPooled jedis = new JedisPooled(REDDIS_URL);
+
+        RedisVectorStore<GitHubFile> vectorStore = RedisVectorStore.<GitHubFile>builder()
+            .withClient(jedis)
+            .withOptions(new RedisVectorStoreOptions<>(GitHubFile.class, null))
+            .build();
 
         String collectionName = "skgithubfiles";
-        var collection = azureAISearchVectorStore.getCollection(collectionName, null);
+        var collection = vectorStore.getCollection(collectionName, null);
 
         // Create collection if it does not exist and store data
         collection
@@ -139,7 +165,7 @@ public class AzureAISearch {
     }
 
     private static Mono<List<String>> storeData(
-        AzureAISearchVectorStoreRecordCollection<GitHubFile> recordStore,
+        VectorStoreRecordCollection<String, GitHubFile> recordStore,
         OpenAITextEmbeddingGenerationService embeddingGeneration,
         Map<String, String> data) {
 
